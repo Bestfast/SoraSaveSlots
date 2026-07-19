@@ -1,0 +1,124 @@
+// SoraSaveSlots v2 - Cheat Engine Auto Assemble prototype
+//
+// Paste into Cheat Engine (Tools -> Auto Assemble), then
+// File -> Assign to current cheat table, and tick the entry to enable.
+//
+// v1 hooked the menu display builder's LOCAL copy of the slot-range list, so
+// the new slots rendered but save/load silently did nothing: the confirm
+// handler (sora_1st.exe+56EDC0), the slot enable pass (+56E080) and the
+// detail.json enumeration (+570200) all validate against the SOURCE list -
+// the dialog param block stored at accessor+37B8 (ranges: data ptr at
+// param+70, count at param+78, inline capacity 8).
+//
+// v2 hooks the four AccessorWin32 setters that store that param pointer and
+// appends {200, 299} to the source list itself. Every consumer - display,
+// enable, confirm, enumeration - then agrees.
+//
+// Why 200 and not 175: slots 180-199 are a reserved 20-slot window used by an
+// alternate dialog mode (its range list is exactly {180,199} - the guard
+// below skips any list that reaches slot 180+), and 175-179 sit inside the
+// title-load dialog's reserved presentation block {171,179}. Slots 200-299
+// are genuinely free.
+//
+// Do NOT raise 0000012B (=299): the backing slot array only holds 300 entries.
+
+[ENABLE]
+alloc(newmem,2048,"sora_1st.exe"+56C29A)
+label(append)
+label(done)
+label(stub1)
+label(stub2)
+label(stub3)
+label(stub4)
+label(back1)
+label(back2)
+label(back3)
+label(back4)
+
+newmem:
+// shared body: rax = param block ptr, appends {200,299,1} unless the list is
+// empty, full, or already reaches slot 180+ (the reserved system window).
+append:
+  push rcx
+  push rdx
+  pushfq
+  mov ecx,[rax+78]                  // range count
+  test ecx,ecx
+  je done                           // empty - leave alone
+  cmp ecx,07
+  ja done                           // no room (capacity 8)
+  mov rdx,[rax+70]                  // range data
+@@:
+  cmp dword ptr [rdx+04],000000B4   // end >= 180? reserved window - skip
+  jae done
+  add rdx,0C
+  dec ecx
+  jne @b
+  // rdx = &range[count]
+  mov dword ptr [rdx],000000C8      // start = 200
+  mov dword ptr [rdx+04],0000012B   // end   = 299
+  mov dword ptr [rdx+08],1          // enabled flag
+  inc dword ptr [rax+78]
+done:
+  popfq
+  pop rdx
+  pop rcx
+  pop rax
+  ret
+
+stub1:
+  mov [rcx+37B8],r8                 // original instruction
+  push rax
+  mov rax,r8
+  call append
+  jmp back1
+stub2:
+  mov [rcx+37B8],r8
+  push rax
+  mov rax,r8
+  call append
+  jmp back2
+stub3:
+  mov [rcx+37B8],r8
+  push rax
+  mov rax,r8
+  call append
+  jmp back3
+stub4:
+  mov [rcx+37B8],rdx                // original instruction (param in rdx here)
+  push rax
+  mov rax,rdx
+  call append
+  jmp back4
+
+// the four param-store sites (each exactly 7 bytes)
+"sora_1st.exe"+56C29A:
+  jmp stub1
+  nop 2
+back1:
+
+"sora_1st.exe"+56C59A:
+  jmp stub2
+  nop 2
+back2:
+
+"sora_1st.exe"+56C68A:
+  jmp stub3
+  nop 2
+back3:
+
+"sora_1st.exe"+56C9E3:
+  jmp stub4
+  nop 2
+back4:
+
+[DISABLE]
+"sora_1st.exe"+56C29A:
+  db 4C 89 81 B8 37 00 00
+"sora_1st.exe"+56C59A:
+  db 4C 89 81 B8 37 00 00
+"sora_1st.exe"+56C68A:
+  db 4C 89 81 B8 37 00 00
+"sora_1st.exe"+56C9E3:
+  db 48 89 91 B8 37 00 00
+dealloc(newmem)

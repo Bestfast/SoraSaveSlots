@@ -1,0 +1,19 @@
+# build artefacts
+*.obj
+*.exp
+*.lib
+*.pdb
+*.ilk
+tools/probes/*.exe
+
+# runtime output
+*.log
+
+# python
+.venv/
+__pycache__/
+
+# ghidra projects (huge, regenerable)
+*.gpr
+*.rep/
+ghidra_proj/

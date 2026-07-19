@@ -1,0 +1,49 @@
+// SoraSaveSlots - Cheat Engine Auto Assemble prototype
+//
+// Paste into Cheat Engine (Tools -> Auto Assemble), then
+// File -> Assign to current cheat table, and tick the entry to enable.
+//
+// Hooks the save-list builder right after it copies its {start,end} range
+// descriptors into a local buffer, and APPENDS a range {175, 299}, so the menu
+// enumerates the 125 unused backing slots in addition to the stock 175.
+//
+// The game's own ranges are left untouched:
+//     {170,170} autosave | {0,169} manual | {171,174} reserved
+// Replacing them with a single flattened {0,299} also yields 300 slots, but
+// destroys the slot categorisation the save/load path relies on - saving then
+// fails and the slot list stops rendering. Append, do not flatten.
+//
+// 000000AF = 175 (first new slot), 0000012B = 299 (last).
+// Do NOT raise 299: the backing slot array only holds 300 entries.
+
+[ENABLE]
+alloc(newmem,2048,"sora_1st.exe"+591370)
+label(skip)
+label(return)
+
+newmem:
+  mov eax,[rbp-08]                  // eax = existing group count (3)
+  cmp eax,07                        // copy routine handles at most 8 groups
+  jae skip
+  lea rcx,[rbp-70]                  // rcx = group array
+  lea rdx,[rax+rax*2]               // rdx = count*3
+  lea rcx,[rcx+rdx*4]               // rcx = &group[count]  (stride 12)
+  mov [rcx],000000AF                // new.start = 175
+  mov [rcx+04],0000012B             // new.end   = 299
+  mov [rcx+08],3F800001             // third field, matching the game's ranges
+  inc eax
+  mov [rbp-08],eax                  // count += 1
+skip:
+  mov eax,[rbp-08]                  // (original instructions)
+  lea rcx,[rax+rax*2]
+  jmp return
+
+"sora_1st.exe"+591370:
+  jmp newmem
+  nop 2
+return:
+
+[DISABLE]
+"sora_1st.exe"+591370:
+  db 8B 45 F8 48 8D 0C 40
+dealloc(newmem)
