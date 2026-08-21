@@ -17,3 +17,11 @@ __pycache__/
 *.gpr
 *.rep/
 ghidra_proj/
+
+# AI assistant configs
+.clinerules/
+.cursor/
+.github/
+.opencode/
+.windsurf/
+AGENTS.md

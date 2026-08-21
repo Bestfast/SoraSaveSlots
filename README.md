@@ -6,72 +6,69 @@
 > saves but has **not** had independent human code review. Use at your own
 > risk, and back up your saves before trying it — see [Safety](#safety).
 
-Raises the save-slot limit in **The Legend of Heroes: Trails in the Sky 1st Chapter**
-(2025 remake, `sora_1st.exe`) from 175 to up to **999 total slots**, and moves
-the reserved slots (autosave, chapter clears) to the bottom of the list so the
-manual slots run uninterrupted.
+Raises the save-slot limit in the **Trails in the Sky remakes** from stock
+(175 in 1st Chapter, 170 in 2nd Chapter) to up to **999 total slots**, and
+moves the reserved slots (autosave, chapter clears) to the bottom of the list
+so the manual slots run uninterrupted.
 
-Ships as an **ASI plugin**. No game files are modified; the patch is applied to
-the running process and disappears when the game closes.
+One ASI plugin serves both games — the host executable is auto-detected at
+load:
+
+| Game | Host exe | Stock slots |
+|---|---|---|
+| Trails in the Sky 1st Chapter | `sora_1st.exe` | 175 |
+| Trails in the Sky 2nd Chapter (demo) | `sora_2nd.exe` | 170 |
+
+No game files are modified; the patch is applied to the running process and
+disappears when the game closes.
 
 ---
 
 ## What it does
 
-The stock game shows 175 save slots. That number isn't a constant anywhere in
-the executable — every save/load dialog is described by a list of slot ranges
-built at runtime, over a 300-slot backing store laid out like this:
+The slot cap isn't a constant anywhere in the executables. Every save/load
+dialog carries a *param block* containing a list of `{start, end}` slot
+ranges, and everything — display, confirm handler, disk enumeration, the
+save/load executor — validates against that list. The list lives behind a
+pointer stored inside the savedata accessor object.
 
-| Slots | Use |
-|---|---|
-| 0–169 | manual saves |
-| 170 | autosave |
-| 171–174 | chapter-clear saves |
-| 175–199 | **reserved** (a hidden dialog mode owns 180–199; 175–179 border it) |
-| 200–299 | free — never referenced by anything |
+The plugin hooks the instructions that store that pointer and rebuilds each
+dialog's range list as **`[manual] [new 200–N] [reserved]`** — new slots
+continue directly after the manual block, autosave/chapter-clear entries move
+to the bottom, and the reserved regions keep their exact stock behaviour.
 
-This plugin rebuilds each dialog's range list as
-**`[manual 0–169] [new 200–N] [reserved]`** — so the save, load, copy and
-delete menus gain the new slots right after the manual block, with autosave and
-chapter-clear entries moved to the bottom. The reserved regions keep their
-exact stock behaviour.
+With `MaxSlots` above 300 it additionally **replaces the game's slot array**
+with a bigger one (every consumer reads it through a pointer, so it can be
+redirected) and raises the hardcoded icon/page loop bounds. That unlocks
+slots up to 998 — the `save%03d` folder-name format is the true ceiling.
 
-With `MaxSlots` above 300 it additionally **replaces the game's 300-entry slot
-array** with a bigger one (the array is inline in the accessor object, but
-every consumer reads it through a pointer, so it can be redirected) and raises
-the three hardcoded 300-slot loop bounds (icon pass, slot-enable pass, tile
-creation). That unlocks slots up to 998 — the `save%03d` folder-name format is
-the true ceiling.
-
-> **Version history.** v1 hooked only the menu *display* builder: slots
-> rendered but save/load confirm was silently ignored — the confirm handler,
-> slot-enable pass and disk enumeration validate against the *source* range
-> list. v2 patched the source (and moved the new block to 200+, off the
-> reserved window). v3 adds the reorder and the >300 backing expansion.
-> Details in [docs/FINDINGS.md](docs/FINDINGS.md) §9–12.
+Per-game differences handled internally: accessor offsets (`+0x37B8` vs
+`+0x37D8` param pointer, inline vs heap slot array), setter encodings, and
+the backing-redirect site (ctor tail vs icon-pass entry via `.pdata`).
 
 ---
 
 ## Install
 
-1. You need an ASI loader. Any of these work, because the plugin does its work in
-   `DllMain`:
+1. You need an ASI loader. Any of these work, because the plugin does its work
+   in `DllMain`:
    - **Ultimate ASI Loader** (rename its dll to `xinput1_4.dll` or `version.dll`)
-   - **Special K** — add to its config:
+   - **Special K** — add to the game's profile `SpecialK.ini`:
      ```ini
      [Import.SoraSaveSlots]
      Architecture=x64
      Role=ThirdParty
      When=PlugIn
-     Filename=SoraSaveSlots.asi
+     Filename=C:\path\to\Plugins\SoraSaveSlots.asi
+     Mode=
      ```
-2. Copy `SoraSaveSlots.asi` and `SoraSaveSlots.ini` into the game folder:
-   `...\steamapps\common\Trails in the Sky 1st Chapter\`
+2. Copy `SoraSaveSlots.asi` and `SoraSaveSlots.ini` into a folder of your
+   choice (per-game Special K `Plugins\` folders work well).
 3. Launch the game. Check `SoraSaveSlots.log` next to the `.asi` — it should
-   list four `OK: hooked` lines.
+   list the resolved sites and one `OK:` line per hook.
 
-**Back up your saves first**, at
-`%USERPROFILE%\Saved Games\FALCOM\Trails in the Sky 1st Chapter\`.
+**Back up your saves first**, under
+`%USERPROFILE%\Saved Games\FALCOM\<game name>\`.
 
 ---
 
@@ -91,7 +88,7 @@ New slots run from 200 to `MaxSlots-1`. Values above **999** are clamped
 - **`MaxSlots` > 300** — the slot-array replacement and loop-bound patches
   are applied too. This is the riskier half: it redirects a structure the
   game normally owns. It degrades safely (to 300) if any patch site doesn't
-  match or if the game built its save system before the plugin loaded.
+  match.
 
 At 999 expect slower menu opening: the game reads `detail.json` for every
 listed slot on each dialog refresh, loads up to 999 `icon0.png`s at startup,
@@ -99,11 +96,10 @@ and builds 1000 slot tiles.
 
 ## Why slots 175–199 are skipped
 
-They aren't free. The game has an alternate dialog mode whose slot window is
-exactly `{180,199}` (20 slots), and the title-screen load dialog reserves
-`{171,179}`. Saving ordinary games there could collide with those features, so
-the plugin starts at 200. The hook detects the `{180,199}` dialog by content
-and leaves it untouched.
+They aren't free. The games have alternate dialog modes whose slot windows
+reach into 180–199 (system-data dialog `{180,199}`, title-screen load
+`{171,179}`), and 170–174 belong to autosave/chapter clears. The hook detects
+those dialogs by content and leaves them untouched.
 
 ---
 
@@ -114,32 +110,49 @@ and leaves it untouched.
   patched; if only the backing-expansion sites mismatch, it falls back to
   `MaxSlots=300`.
 - **No game files touched.** Runtime patch only.
-- **Reserved slots preserved.** Autosave (170), chapter-clear (171–174) and the
-  reserved window (175–199) keep their original behaviour — they're only
-  *displayed* after the manual/new slots now.
+- **Reserved slots preserved.** Autosave and chapter-clear slots keep their
+  original behaviour — they're only *displayed* after the manual/new slots.
 
 ## Known limitations
 
-- If you create saves in slots 200+ and later remove the plugin, those saves
-  become invisible in-game until it's reinstalled. The files are untouched on
-  disk.
-- The >300 mode replaces a game-owned structure at runtime. It has been
-  reasoned through carefully (see FINDINGS §12) but is inherently riskier
-  than the ≤300 mode — **back up your saves**.
-- Steam Cloud: each save is ~95 KB (mostly `icon0.png`). 999 slots ≈ 93 MB. If
-  cloud sync starts failing, disable Steam Cloud for the game — local saves are
-  unaffected.
+- Saves created in slots 200+ become invisible in-game if you remove the
+  plugin. The files are untouched on disk.
+- The >300 mode replaces a game-owned structure at runtime. Reasoned through
+  carefully (see docs) but inherently riskier than ≤300 — **back up your
+  saves**.
+- Steam Cloud: each save is ~95 KB (mostly `icon0.png`). 999 slots ≈ 93 MB.
+  If cloud sync starts failing, disable Steam Cloud for the game — local
+  saves are unaffected.
 
 ---
 
 ## Repo layout
 
 ```
-src/            ASI plugin source + build script (MSVC)
-dist/           built SoraSaveSlots.asi + .ini
-cheatengine/    CE Auto Assemble prototypes (v1 display hook, v2 source hook)
-tools/          reverse-engineering tooling used to find all this
-docs/           full findings writeup
+src/
+  core.h/.cpp    shared engine: AOB scan, .pdata lookup, code caves,
+                 register-preserving thunks, FixRanges / FixBacking,
+                 install + verify flow
+  sora1.cpp      sora_1st patterns + accessor offsets (resolve only)
+  sora2.cpp      sora_2nd patterns + accessor offsets (resolve only)
+  games.h        GameModule registry externs
+  dllmain.cpp    entry point: log/ini bootstrap, exe detection, dispatch
+  build.bat      MSVC build -> dist\SoraSaveSlots.asi
+dist/            built SoraSaveSlots.asi + .ini
+cheatengine/     CE Auto Assemble prototypes (v1/v2 era)
+tools/           reverse-engineering tooling used to find all this
+docs/            full findings writeups per game
 ```
+
+### Adding a game
+
+1. Copy `src/sora2.cpp` to `src/game_x.cpp`; swap the AOB patterns and the
+   accessor offsets in its `resolve()`.
+2. Add `extern const GameModule game_x;` to `src/games.h`.
+3. Add `&game_x` to `kGames` in `src/dllmain.cpp`.
+4. Rebuild with `src\build.bat`.
+
+Everything else (range rebuild, backing expansion, verification, logging) is
+shared in `core.cpp`.
 
 Build with `src\build.bat` (needs VS 2022 with the C++ workload).
