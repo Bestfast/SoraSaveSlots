@@ -100,21 +100,36 @@ unsigned findFunctionStart(uintptr_t base, unsigned rva) {
 // ---------------------------------------------------------------- patch logic
 
 // Called from the setter caves with the dialog param block.
-// Rebuild the list: [manual <170] [{NEW_START..hi}] [reserved >=170].
+// Rebuild as an ASCENDING, GAP-FREE sequence ending in the new block:
+//   [manual <170] [{170,170}] [{171,174}] [{175,198} filler] [{199..hi}]
+// Three constraints drive this layout (2026-08 game update):
+//  1. The save-menu renderer needs display_position == slot_number, so the
+//     list may not skip slots.
+//  2. The UI labels tiles 1-based, so a tile showing folder saveNNN sits at
+//     position NNN and is labelled NNN+1. Starting the new block at slot 199
+//     puts folder save199 on the tile labelled "200" — what the player reads
+//     matches the folder number for every new slot.
+//  3. The tile-content pass no longer derives its tile count from the range
+//     list. It enumerates positions 0 .. param[+0xC]-1 (hardcoded: save=170,
+//     load=180, title-load=200, system=20) and looks each slot up in the
+//     enumerated-saves tree. So param[+0xC] must be raised alongside the
+//     ranges or the extra slots never get tiles.
 static void __fastcall FixRanges(unsigned char* param) {
     if (!param) return;
     Range* r = *(Range**)(param + 0x70);
     unsigned n = *(unsigned*)(param + 0x78);
     if (!r || n == 0 || n > 7) return;
 
+    const unsigned APP_START = NEW_START - 1;      // 199: label == folder no.
+
     int backing = g_backingSlots ? g_backingSlots : STOCK_BACKING;
     unsigned hi = (unsigned)((g_ctx->slots < backing ? g_ctx->slots : backing) - 1);
-    if (hi < NEW_START) return;
+    if (hi < APP_START) return;
 
-    // Our previously appended block? (happens when this runs before the
-    // backing expansion on the first dialog open). Extend it in place.
+    // Our previously appended block? Extend it in place.
     for (unsigned i = 0; i < n; ++i) {
-        if (r[i].start == NEW_START) {
+        if (r[i].start == APP_START) {
+            *(unsigned*)(param + 0xC) = hi + 1;
             if (r[i].end != hi) {
                 r[i].end = hi;
                 *(unsigned*)(param + 0x78) = n;
@@ -123,23 +138,39 @@ static void __fastcall FixRanges(unsigned char* param) {
             return;
         }
     }
-    // Reserved system dialog (its list reaches {180,199}) or any unknown
-    // dialog already touching high slots: leave it alone.
+    // Reserved system dialog ({180,199}) or unknown high-slot list: untouched.
+    // (Our own lists never reach here - the extend-loop above returns first.)
     for (unsigned i = 0; i < n; ++i)
         if (r[i].end >= 180) return;
 
+    const Range* src170 = nullptr;
+    const Range* src171 = nullptr;
+    for (unsigned i = 0; i < n; ++i) {
+        if      (r[i].start == 170) src170 = &r[i];
+        else if (r[i].start == 171) src171 = &r[i];
+    }
+
     Range tmp[8]; unsigned m = 0;
-    for (unsigned i = 0; i < n; ++i)          // manual slots first
+    for (unsigned i = 0; i < n && m < 8; ++i)      // manual slots, stock order
         if (r[i].start < 170) tmp[m++] = r[i];
-    tmp[m].start = NEW_START;                 // then the new block
-    tmp[m].end = hi;
-    tmp[m].flag = 1;
-    ++m;
-    for (unsigned i = 0; i < n; ++i)          // reserved slots at the bottom
-        if (r[i].start >= 170) tmp[m++] = r[i];
+    if (src170) { if (m < 8) tmp[m++] = *src170; } // autosave, verbatim
+    else { tmp[m].start = 170; tmp[m].end = 170; tmp[m].flag = 1; ++m; }
+    if (src171) { if (m < 8) tmp[m++] = *src171; } // chapter-clears, verbatim
+    else { tmp[m].start = 171; tmp[m].end = 174; tmp[m].flag = 1; ++m; }
+    // filler over the rest of the reserved window (New Game+ slots!). The
+    // enable-flag byte is cleared so the UI treats these tiles as inactive;
+    // they still OCCUPY positions, which keeps position == slot continuity
+    // for everything after them.
+    unsigned fs = 175;
+    if (src171 && src171->end >= fs) fs = src171->end + 1;
+    if (fs <= APP_START - 1 && m < 8) {
+        tmp[m].start = fs; tmp[m].end = APP_START - 1; tmp[m].flag = 0; ++m;
+    }
+    if (m < 8) { tmp[m].start = APP_START; tmp[m].end = hi; tmp[m].flag = 1; ++m; }
 
     memcpy(r, tmp, m * sizeof(Range));
     *(unsigned*)(param + 0x78) = m;
+    *(unsigned*)(param + 0xC) = hi + 1;   // tile-count bound (see note 3 above)
 }
 
 static void patchFixedBounds();

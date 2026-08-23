@@ -18,6 +18,10 @@ const unsigned char s_r8m[] = { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF };
 // 1x setter: mov [rcx+37B8h], rdx
 const unsigned char s_rdxb[] = { 0x48,0x89,0x91,0xB8,0x37,0x00,0x00 };
 const unsigned char s_rdxm[] = { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF };
+// 2026-08 update note: the save-menu tile pass reads a tile-count bound from
+// param_block+0xC (save=170/load=180/title=200 stock; see core.cpp FixRanges
+// note 3). accessor+0x37C0 itself stays a plain dword field - NOT a second
+// param block pointer (hooking stores to it corrupted dialog mode).
 // ctor tail: mov dword ptr [r14+37DCh], 12Ch (REX.B prefix is part of the
 // pattern: matching without it hooks mid-instruction - v3 startup crash)
 const unsigned char s_ctorb[] = { 0x41,0xC7,0x86,0xDC,0x37,0x00,0x00,0x2C,0x01,0x00,0x00 };
@@ -60,6 +64,8 @@ bool resolve(GameContext& c) {
     c.setters[c.nSetters].paramInRdx = true;
     c.setters[c.nSetters].paramInRsi = false;
     ++c.nSetters;
+
+    // (No +0x37C0 hook: that offset is a dword field, not a param pointer.)
 
     // ctor tail = backing redirect site
     n = scanText(c, AOB("s1_ctor", s_ctorb, s_ctorm, 1), hits, 1);
