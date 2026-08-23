@@ -99,31 +99,79 @@ unsigned findFunctionStart(uintptr_t base, unsigned rva) {
 
 // ---------------------------------------------------------------- patch logic
 
-// Called from the setter caves with the dialog param block.
-// Rebuild as an ASCENDING, GAP-FREE sequence ending in the new block:
-//   [manual <170] [{170,170}] [{171,174}] [{175,198} filler] [{199..hi}]
-// Three constraints drive this layout (2026-08 game update):
-//  1. The save-menu renderer needs display_position == slot_number, so the
-//     list may not skip slots.
-//  2. The UI labels tiles 1-based, so a tile showing folder saveNNN sits at
-//     position NNN and is labelled NNN+1. Starting the new block at slot 199
-//     puts folder save199 on the tile labelled "200" — what the player reads
-//     matches the folder number for every new slot.
-//  3. The tile-content pass no longer derives its tile count from the range
-//     list. It enumerates positions 0 .. param[+0xC]-1 (hardcoded: save=170,
-//     load=180, title-load=200, system=20) and looks each slot up in the
-//     enumerated-saves tree. So param[+0xC] must be raised alongside the
-//     ranges or the extra slots never get tiles.
-static void __fastcall FixRanges(unsigned char* param) {
+// Highest saveNNN directory in the game's Saved Games folder, or 0xFFFFFFFF
+// if the scan is unavailable (unknown path / nothing found / error).
+static unsigned ScanMaxSaveSlot() {
+    if (!g_ctx->savedGamesDir) return 0xFFFFFFFFu;
+    wchar_t root[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"USERPROFILE", root, MAX_PATH);
+    if (!n || n >= MAX_PATH) return 0xFFFFFFFFu;
+
+    wchar_t pat[MAX_PATH];
+    if (_snwprintf_s(pat, MAX_PATH, _TRUNCATE,
+                     L"%s\\Saved Games\\FALCOM\\%s\\savedata\\save*",
+                     root, g_ctx->savedGamesDir) == -1) return 0xFFFFFFFFu;
+
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileExW(pat, FindExInfoBasic, &fd,
+                                FindExSearchLimitToDirectories, nullptr,
+                                FIND_FIRST_EX_LARGE_FETCH);
+    if (h == INVALID_HANDLE_VALUE) return 0xFFFFFFFFu;
+    unsigned max = 0; bool any = false;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        const wchar_t* s = fd.cFileName + 4;          // past "save"
+        unsigned v = 0; bool dig = false;
+        while (*s >= L'0' && *s <= L'9') { v = v * 10 + (unsigned)(*s - L'0'); ++s; ++dig; }
+        if (dig && *s == L'\0' && v < FILENAME_LIMIT && (!any || v > max)) { max = v; any = true; }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return any ? max : 0xFFFFFFFFu;
+}
+
+// Called from the setter caves with the dialog param block (arg2 = accessor).
+// Rebuilt layouts:
+//   load-style: [manual <170] [{200..hi}] [{170,170}] [{171,174}] [{175,199} filler]
+//               rendered via the container's ordered-mode flag (+0xDE0=1),
+//               so the autosave/backups sit at the BOTTOM of the menu.
+//   save-style: [manual <170] [{200..hi}]  with 170-199 left UNCOVERED.
+// Constraints driving this layout (2026-08 game update):
+//  1. The sequential tile renderer locks tile position == slot_number; gaps
+//     are only allowed where nothing should ever render or be selectable.
+//  2. Slots 180-199 are the reserved system window (the game treats an
+//     occupied slot there as clear data and switches the title menu to
+//     New Game+), so the new block starts at 200. Tiles are labelled
+//     position+1, so folder saveNNN sits on the tile labelled NNN+1.
+//  3. The tile-content pass derives its count from param[+0xC], not from the
+//     range list, so param[+0xC] must be raised alongside the ranges.
+//  4. A list that arrives WITHOUT reserved entries is the save dialog (stock:
+//     {0,169} only). Keeping 170-199 uncovered means the enumerator/confirm/
+//     enable passes never touch the autosave or backups there - stock
+//     behaviour restored for the save menu.
+static void __fastcall FixRanges(unsigned char* param, unsigned char* accessor) {
     if (!param) return;
     Range* r = *(Range**)(param + 0x70);
     unsigned n = *(unsigned*)(param + 0x78);
     if (!r || n == 0 || n > 7) return;
 
-    const unsigned APP_START = NEW_START - 1;      // 199: label == folder no.
+    const unsigned APP_START = NEW_START;          // 200: first free slot
 
     int backing = g_backingSlots ? g_backingSlots : STOCK_BACKING;
     unsigned hi = (unsigned)((g_ctx->slots < backing ? g_ctx->slots : backing) - 1);
+
+    // Dynamic window (ini DynamicWindow, default on): show at most
+    // last-save-on-disk + headroom, floored so the new block stays reachable.
+    if (g_ctx->dynamicWindow) {
+        unsigned m = ScanMaxSaveSlot();
+        if (m != 0xFFFFFFFFu) {
+            unsigned want = m + DYNAMIC_HEADROOM;
+            if (want < DYNAMIC_FLOOR) want = DYNAMIC_FLOOR;
+            if (want < hi) {
+                hi = want;
+                L("FixRanges: dynamic window -> %u (last save on disk %u)\n", hi, m);
+            }
+        }
+    }
     if (hi < APP_START) return;
 
     // Our previously appended block? Extend it in place.
@@ -145,28 +193,41 @@ static void __fastcall FixRanges(unsigned char* param) {
 
     const Range* src170 = nullptr;
     const Range* src171 = nullptr;
+    bool saveStyle = true;                         // no reserved entries?
     for (unsigned i = 0; i < n; ++i) {
-        if      (r[i].start == 170) src170 = &r[i];
-        else if (r[i].start == 171) src171 = &r[i];
+        if      (r[i].start == 170) { src170 = &r[i]; saveStyle = false; }
+        else if (r[i].start == 171) { src171 = &r[i]; saveStyle = false; }
     }
 
     Range tmp[8]; unsigned m = 0;
     for (unsigned i = 0; i < n && m < 8; ++i)      // manual slots, stock order
         if (r[i].start < 170) tmp[m++] = r[i];
-    if (src170) { if (m < 8) tmp[m++] = *src170; } // autosave, verbatim
-    else { tmp[m].start = 170; tmp[m].end = 170; tmp[m].flag = 1; ++m; }
-    if (src171) { if (m < 8) tmp[m++] = *src171; } // chapter-clears, verbatim
-    else { tmp[m].start = 171; tmp[m].end = 174; tmp[m].flag = 1; ++m; }
-    // filler over the rest of the reserved window (New Game+ slots!). The
-    // enable-flag byte is cleared so the UI treats these tiles as inactive;
-    // they still OCCUPY positions, which keeps position == slot continuity
-    // for everything after them.
-    unsigned fs = 175;
-    if (src171 && src171->end >= fs) fs = src171->end + 1;
-    if (fs <= APP_START - 1 && m < 8) {
-        tmp[m].start = fs; tmp[m].end = APP_START - 1; tmp[m].flag = 0; ++m;
+    if (!saveStyle) {
+        // Ordered mode (experiment): new block first, reserved tiles last.
+        if (m < 8) { tmp[m].start = APP_START; tmp[m].end = hi; tmp[m].flag = 1; ++m; }
+        if (src170) { if (m < 8) tmp[m++] = *src170; }   // autosave, verbatim
+        else { tmp[m].start = 170; tmp[m].end = 170; tmp[m].flag = 1; ++m; }
+        if (src171) { if (m < 8) tmp[m++] = *src171; }   // chapter-clears, verbatim
+        else { tmp[m].start = 171; tmp[m].end = 174; tmp[m].flag = 1; ++m; }
+        // Inactive filler closes the list; flag=0 marks those tiles dead.
+        unsigned fs = 175;
+        if (src171 && src171->end >= fs) fs = src171->end + 1;
+        if (fs <= APP_START - 1 && m < 8) {
+            tmp[m].start = fs; tmp[m].end = APP_START - 1; tmp[m].flag = 0; ++m;
+        }
+        if (g_ctx->offTileContainer >= 0 && accessor)
+            *(unsigned*)(accessor + (unsigned)g_ctx->offTileContainer + 0xDE0) = 1;
+    } else {
+        // saveStyle: leave 170-199 UNCOVERED. The tile renderer is range-
+        // independent (it walks positions and tree-lookups each slot), but
+        // the enumerator/confirm/enable passes all test ranges - an
+        // uncovered slot is never enumerated, never selectable, never
+        // savable. That hides the autosave and backups from the save menu
+        // exactly like stock did.
+        if (m < 8) { tmp[m].start = APP_START; tmp[m].end = hi; tmp[m].flag = 1; ++m; }
+        if (g_ctx->offTileContainer >= 0 && accessor)
+            *(unsigned*)(accessor + (unsigned)g_ctx->offTileContainer + 0xDE0) = 0;
     }
-    if (m < 8) { tmp[m].start = APP_START; tmp[m].end = hi; tmp[m].flag = 1; ++m; }
 
     memcpy(r, tmp, m * sizeof(Range));
     *(unsigned*)(param + 0x78) = m;
@@ -211,7 +272,7 @@ static void __fastcall FixBacking(unsigned char* accessor) {
     // The current dialog's ranges were capped before the backing existed
     // (setters fire before the icon pass). Extend them right away.
     unsigned char* param = *(unsigned char**)(accessor + c.offParam);
-    if (param) FixRanges(param);
+    if (param) FixRanges(param, accessor);
     L("FixBacking: accessor %p -> %u-entry buffer %p, count/max = %d\n",
       accessor, entries, buf, slots);
 }
@@ -249,6 +310,9 @@ unsigned char* emitCallThunk(unsigned char* p, unsigned char* site,
     else if (argMode == 3) { *p++ = 0x48; *p++ = 0x8B; *p++ = 0x4B; *p++ = 0x28; } // rcx=[rbx+28h]
     else if (argMode == 4) { *p++ = 0x48; *p++ = 0x8B; *p++ = 0x4B; *p++ = 0x30; } // rcx=[rbx+30h]
     else                   { *p++ = 0x49; *p++ = 0x8B; *p++ = 0xCE; }              // mov rcx, r14
+    // arg2 (rdx) = the accessor: for every store site hooked here the
+    // accessor lives in rcx on entry (saved at [rbx+30h]).
+    *p++ = 0x48; *p++ = 0x8B; *p++ = 0x53; *p++ = 0x30;   // mov rdx, [rbx+30h]
     *p++ = 0x48; *p++ = 0xB8;                     // mov rax, imm64
     *(unsigned long long*)p = (unsigned long long)(uintptr_t)target; p += 8;
     *p++ = 0xFF; *p++ = 0xD0;                     // call rax

@@ -44,7 +44,7 @@ static DWORD WINAPI init(LPVOID param) {
     siblingPath(inip, MAX_PATH, self, L".ini");
     coreOpenLog(logp);
 
-    L("SoraSaveSlots v5.0.1\n");
+    L("SoraSaveSlots v5.1\n");
 
     // ---- detect host exe --------------------------------------------------
     wchar_t exeName[MAX_PATH];
@@ -82,7 +82,9 @@ static DWORD WINAPI init(LPVOID param) {
         return 0;
     }
     ctx.slots = slots;
-    L("MaxSlots = %d, base = 0x%llx\n", slots, (unsigned long long)ctx.base);
+    ctx.dynamicWindow = GetPrivateProfileIntW(L"SoraSaveSlots", L"DynamicWindow", 1, inip) != 0;
+    L("MaxSlots = %d, DynamicWindow = %d, base = 0x%llx\n",
+      slots, ctx.dynamicWindow ? 1 : 0, (unsigned long long)ctx.base);
 
     installGame(*game, ctx);
     coreCloseLog();

@@ -40,6 +40,8 @@ bool resolve(GameContext& c) {
     c.offSlotCnt  = 0x23A8;
     c.offParam    = 0x37B8;
     c.offSlotMax  = 0x37DC;
+    c.savedGamesDir = L"Trails in the Sky 1st Chapter";
+    c.offTileContainer = 0x3888;   // +0xDE0 = ordered-mode flag (experiment)
     c.iconImmOff     = 2;      // `81 FE imm32` - no REX prefix
     c.backingArgMode = 2;      // accessor arrives in r14 at the ctor tail
 

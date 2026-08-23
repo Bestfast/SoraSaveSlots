@@ -14,6 +14,8 @@ static const int DEFAULT_SLOTS  = 999;
 static const int FILENAME_LIMIT = 999;   // save%03d
 static const int STOCK_BACKING  = 300;   // slot array the games allocate
 static const unsigned NEW_START = 200;   // first slot past every reserved block
+static const unsigned DYNAMIC_HEADROOM = 50;      // free tiles past last save on disk
+static const unsigned DYNAMIC_FLOOR    = 250;     // never shrink the window below this
 
 static const int MAX_SETTERS      = 8;
 static const int MAX_PAGES        = 2;
@@ -64,6 +66,12 @@ struct GameContext {
     unsigned offSlotCnt;                   // slot array count (u32)
     unsigned offParam;                     // dialog param-block pointer
     int      offSlotMax;                   // "max" field, -1 if none
+
+    // %USERPROFILE%\Saved Games\FALCOM\<this>\savedata - for the dynamic window
+    const wchar_t* savedGamesDir;
+    int      dynamicWindow;                // cap visible slots to max-on-disk + headroom
+    int      offTileContainer;             // accessor offset of the tile container
+                                          // (-1 = ordered-mode experiment off)
 
     // resolved hook sites
     SetterSite setters[MAX_SETTERS];

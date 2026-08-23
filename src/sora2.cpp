@@ -39,6 +39,8 @@ bool resolve(GameContext& c) {
     c.offSlotCnt  = 0x23B8;
     c.offParam    = 0x37D8;
     c.offSlotMax  = -1;
+    c.savedGamesDir = L"Trails in the Sky 2nd Chapter";
+    c.offTileContainer = -1;       // ordered-mode experiment: sora_1st only
     c.iconImmOff     = 3;      // `41 81 FE imm32` - REX prefix shifts the imm
     c.backingArgMode = 4;      // accessor arrives in rcx at the icon entry
 
