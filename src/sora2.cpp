@@ -33,6 +33,9 @@ const unsigned char s_page1b[] = { 0x41,0x83,0xFD,0x3C,0x0F,0x8C,0x00,0x00,0x00,
 const unsigned char s_page1m[] = { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x00,0x00,0x00 };
 const unsigned char s_page2b[] = { 0x41,0x83,0xFC,0x3C,0x0F,0x82,0x00,0x00,0x00,0x00 }; // r12d / jc
 const unsigned char s_page2m[] = { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x00,0x00,0x00 };
+// autosave executor (state 6): mov edx,0AAh ; call qword ptr [rax+30h]
+const unsigned char s_autob[] = { 0xBA,0xAA,0x00,0x00,0x00,0xFF,0x50,0x30 };
+const unsigned char s_autom[] = { 0xFF,0xFF,0x00,0x00,0x00,0xFF,0xFF,0xFF };
 
 bool resolve(GameContext& c) {
     c.offSlotData = 0x23B0;
@@ -73,6 +76,20 @@ bool resolve(GameContext& c) {
     c.setters[c.nSetters].paramInRdx = true;
     c.setters[c.nSetters].paramInRsi = false;
     ++c.nSetters;
+
+    // Autosave executor site (independent of the >300 backing path): the plain
+    // autosave hardcodes the live slot in `mov edx,0AAh; call [rax+30h]`.
+    n = scanText(c, AOB("s2_autosave", s_autob, s_autom, 1), hits, 1);
+    if (n == 1) {
+        c.autoRva = hits[0];
+        c.autoLen = 5;
+        memcpy(c.autoExpect, s_autob, 5);
+        c.autoSlot = AUTOSAVE_LIVE_SLOT;
+        L("s2_autosave +0x%X (live slot %u)\n", hits[0], AUTOSAVE_LIVE_SLOT);
+    } else {
+        c.autoRva = 0;
+        L("WARNING: s2_autosave found %d (want 1); autosave history disabled.\n", n);
+    }
 
     if (c.slots <= STOCK_BACKING) {
         L("MaxSlots<=%d: backing sites not needed, skipping.\n", STOCK_BACKING);

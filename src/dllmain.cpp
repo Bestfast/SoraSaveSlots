@@ -44,7 +44,7 @@ static DWORD WINAPI init(LPVOID param) {
     siblingPath(inip, MAX_PATH, self, L".ini");
     coreOpenLog(logp);
 
-    L("SoraSaveSlots v5.1\n");
+    L("SoraSaveSlots v5.2\n");
 
     // ---- detect host exe --------------------------------------------------
     wchar_t exeName[MAX_PATH];
@@ -85,6 +85,17 @@ static DWORD WINAPI init(LPVOID param) {
     ctx.dynamicWindow = GetPrivateProfileIntW(L"SoraSaveSlots", L"DynamicWindow", 1, inip) != 0;
     L("MaxSlots = %d, DynamicWindow = %d, base = 0x%llx\n",
       slots, ctx.dynamicWindow ? 1 : 0, (unsigned long long)ctx.base);
+
+    // Autosave history ring (sora_2nd only; ignored by games without the site).
+    int autoSlots = (int)GetPrivateProfileIntW(L"SoraSaveSlots", L"AutosaveSlots",
+                                               DEFAULT_AUTOSAVE_SLOTS, inip);
+    if (autoSlots < 0) autoSlots = 0;
+    if (autoSlots > MAX_AUTOSAVE_SLOTS) autoSlots = MAX_AUTOSAVE_SLOTS;
+    if (autoSlots > STOCK_BACKING - (int)NEW_START) autoSlots = STOCK_BACKING - (int)NEW_START;
+    ctx.autoHistCount = autoSlots;
+    ctx.autoHistStart = (unsigned)(STOCK_BACKING - autoSlots);
+    L("AutosaveSlots = %d (ring %u..%u)\n", autoSlots, ctx.autoHistStart,
+      autoSlots > 0 ? ctx.autoHistStart + (unsigned)autoSlots - 1 : 0);
 
     installGame(*game, ctx);
     coreCloseLog();

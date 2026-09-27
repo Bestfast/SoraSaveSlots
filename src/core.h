@@ -17,6 +17,13 @@ static const unsigned NEW_START = 200;   // first slot past every reserved block
 static const unsigned DYNAMIC_HEADROOM = 50;      // free tiles past last save on disk
 static const unsigned DYNAMIC_FLOOR    = 250;     // never shrink the window below this
 
+// Autosave history (sora_2nd): the game keeps a single live autosave slot; the
+// plugin mirrors every autosave into a ring of extra slots and exposes the ring
+// as its own menu block. The live slot and the writer are left untouched.
+static const unsigned AUTOSAVE_LIVE_SLOT     = 170;  // stock autosave folder index
+static const int      DEFAULT_AUTOSAVE_SLOTS = 10;   // ring size (0 = feature off)
+static const int      MAX_AUTOSAVE_SLOTS     = 64;   // upper clamp for the ring
+
 static const int MAX_SETTERS      = 8;
 static const int MAX_PAGES        = 2;
 static const int ENTRY_EXPECT_MAX = 16;
@@ -72,6 +79,14 @@ struct GameContext {
     int      dynamicWindow;                // cap visible slots to max-on-disk + headroom
     int      offTileContainer;             // accessor offset of the tile container
                                           // (-1 = ordered-mode experiment off)
+
+    // ---- autosave history (optional; autoRva==0 disables it for a game) ----
+    unsigned autoRva;                      // `mov edx,<live slot>; call [rax+30h]`
+    unsigned autoLen;                      // bytes at autoRva (replayed in the cave)
+    unsigned char autoExpect[8];           // original bytes at autoRva
+    unsigned autoSlot;                     // live autosave slot (folder index)
+    int      autoHistCount;                // ring size (0 = off)
+    unsigned autoHistStart;                // first ring slot
 
     // resolved hook sites
     SetterSite setters[MAX_SETTERS];

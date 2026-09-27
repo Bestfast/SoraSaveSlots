@@ -23,6 +23,11 @@ static volatile LONG  g_boundsPatched = 0;       // icon/page bounds raised once
 static void*          g_installed[MAX_INSTALLED]; // every buffer we handed out
 static unsigned char* g_pageCave;                // lazy page-loop caves
 
+// autosave-history state (see AutosaveHistoryTick)
+static volatile LONG     g_autoCopyBusy  = 0;    // re-entry guard
+static unsigned long long g_autoLastMtime = 0;   // last live-save mtime we mirrored
+static unsigned          g_autoLastSize  = 0;    // ...and its size
+
 // ---------------------------------------------------------------- basics
 static void* allocNear(void* anchor, size_t size) {
     SYSTEM_INFO si; GetSystemInfo(&si);
@@ -99,18 +104,27 @@ unsigned findFunctionStart(uintptr_t base, unsigned rva) {
 
 // ---------------------------------------------------------------- patch logic
 
+// %USERPROFILE%\Saved Games\FALCOM\<game>\savedata, or false if unavailable.
+static bool SavedataRoot(wchar_t* out, size_t n) {
+    if (!g_ctx || !g_ctx->savedGamesDir) return false;
+    wchar_t up[MAX_PATH];
+    DWORD len = GetEnvironmentVariableW(L"USERPROFILE", up, MAX_PATH);
+    if (!len || len >= MAX_PATH) return false;
+    return _snwprintf_s(out, n, _TRUNCATE,
+                        L"%s\\Saved Games\\FALCOM\\%s\\savedata",
+                        up, g_ctx->savedGamesDir) != -1;
+}
+
 // Highest saveNNN directory in the game's Saved Games folder, or 0xFFFFFFFF
-// if the scan is unavailable (unknown path / nothing found / error).
+// if the scan is unavailable (unknown path / nothing found / error). The
+// autosave-history ring is excluded so it does not inflate the window.
 static unsigned ScanMaxSaveSlot() {
-    if (!g_ctx->savedGamesDir) return 0xFFFFFFFFu;
     wchar_t root[MAX_PATH];
-    DWORD n = GetEnvironmentVariableW(L"USERPROFILE", root, MAX_PATH);
-    if (!n || n >= MAX_PATH) return 0xFFFFFFFFu;
+    if (!SavedataRoot(root, MAX_PATH)) return 0xFFFFFFFFu;
 
     wchar_t pat[MAX_PATH];
-    if (_snwprintf_s(pat, MAX_PATH, _TRUNCATE,
-                     L"%s\\Saved Games\\FALCOM\\%s\\savedata\\save*",
-                     root, g_ctx->savedGamesDir) == -1) return 0xFFFFFFFFu;
+    if (_snwprintf_s(pat, MAX_PATH, _TRUNCATE, L"%s\\save*", root) == -1)
+        return 0xFFFFFFFFu;
 
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileExW(pat, FindExInfoBasic, &fd,
@@ -123,10 +137,89 @@ static unsigned ScanMaxSaveSlot() {
         const wchar_t* s = fd.cFileName + 4;          // past "save"
         unsigned v = 0; bool dig = false;
         while (*s >= L'0' && *s <= L'9') { v = v * 10 + (unsigned)(*s - L'0'); ++s; ++dig; }
-        if (dig && *s == L'\0' && v < FILENAME_LIMIT && (!any || v > max)) { max = v; any = true; }
+        if (!dig || *s != L'\0' || v >= FILENAME_LIMIT) continue;
+        if (g_ctx->autoRva && g_ctx->autoHistCount > 0 &&
+            v >= g_ctx->autoHistStart &&
+            v <  g_ctx->autoHistStart + (unsigned)g_ctx->autoHistCount)
+            continue;                                  // history ring: ignore
+        if (!any || v > max) { max = v; any = true; }
     } while (FindNextFileW(h, &fd));
     FindClose(h);
     return any ? max : 0xFFFFFFFFu;
+}
+
+// Called from the autosave cave just BEFORE the game overwrites the live
+// autosave slot. Mirrors the *current* (previous) autosave folder into the
+// oldest/empty ring slot, so the live slot keeps behaving exactly as stock
+// ("load latest" etc.) while the ring keeps a rolling history.
+static void AutosaveHistoryTick(void) {
+    const GameContext& c = *g_ctx;
+    if (!c.autoRva || c.autoHistCount <= 0) return;
+    if (InterlockedExchange(&g_autoCopyBusy, 1)) return;
+
+    wchar_t root[MAX_PATH];
+    if (!SavedataRoot(root, MAX_PATH)) { InterlockedExchange(&g_autoCopyBusy, 0); return; }
+
+    wchar_t live[MAX_PATH], liveDir[MAX_PATH];
+    _snwprintf_s(liveDir, MAX_PATH, _TRUNCATE, L"%s\\save%03u", root, c.autoSlot);
+    _snwprintf_s(live,    MAX_PATH, _TRUNCATE, L"%s\\savedata", liveDir);
+
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (!GetFileAttributesExW(live, GetFileExInfoStandard, &fad) || !fad.nFileSizeLow) {
+        InterlockedExchange(&g_autoCopyBusy, 0);
+        return;                                      // no live autosave yet
+    }
+    unsigned long long mt = ((unsigned long long)fad.ftLastWriteTime.dwHighDateTime << 32)
+                          |  (unsigned long long)fad.ftLastWriteTime.dwLowDateTime;
+    L("autosave-hist: hook fired (live save%03u mtime=%llu size=%u)\n",
+      c.autoSlot, mt, fad.nFileSizeLow);
+
+    if (mt == g_autoLastMtime && fad.nFileSizeLow == g_autoLastSize) {
+        InterlockedExchange(&g_autoCopyBusy, 0);
+        return;                                      // same autosave, twin hook
+    }
+
+    // Pick the ring target: first empty slot, else the oldest.
+    int best = -1; unsigned long long bestMt = 0;
+    for (int i = 0; i < c.autoHistCount; ++i) {
+        unsigned slot = c.autoHistStart + (unsigned)i;
+        wchar_t f[MAX_PATH];
+        _snwprintf_s(f, MAX_PATH, _TRUNCATE, L"%s\\save%03u\\savedata", root, slot);
+        WIN32_FILE_ATTRIBUTE_DATA a;
+        if (!GetFileAttributesExW(f, GetFileExInfoStandard, &a)) { best = (int)slot; break; }
+        unsigned long long m = ((unsigned long long)a.ftLastWriteTime.dwHighDateTime << 32)
+                             |  (unsigned long long)a.ftLastWriteTime.dwLowDateTime;
+        if (best < 0 || m < bestMt) { bestMt = m; best = (int)slot; }
+    }
+    if (best < 0) { InterlockedExchange(&g_autoCopyBusy, 0); return; }
+
+    wchar_t tgtDir[MAX_PATH], pat[MAX_PATH];
+    _snwprintf_s(tgtDir, MAX_PATH, _TRUNCATE, L"%s\\save%03d", root, best);
+    CreateDirectoryW(tgtDir, nullptr);
+    _snwprintf_s(pat, MAX_PATH, _TRUNCATE, L"%s\\*", liveDir);
+
+    int copied = 0;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            wchar_t src[MAX_PATH], dst[MAX_PATH];
+            _snwprintf_s(src, MAX_PATH, _TRUNCATE, L"%s\\%s", liveDir, fd.cFileName);
+            _snwprintf_s(dst, MAX_PATH, _TRUNCATE, L"%s\\%s", tgtDir,  fd.cFileName);
+            if (CopyFileW(src, dst, FALSE)) ++copied;
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    if (copied) {
+        g_autoLastMtime = mt;
+        g_autoLastSize  = fad.nFileSizeLow;
+        L("autosave-hist: mirrored save%03u -> save%03d (%d file%s)\n",
+          c.autoSlot, best, copied, copied == 1 ? "" : "s");
+    } else {
+        L("autosave-hist: mirror to save%03d failed (%lu)\n", best, GetLastError());
+    }
+    InterlockedExchange(&g_autoCopyBusy, 0);
 }
 
 // Called from the setter caves with the dialog param block (arg2 = accessor).
@@ -174,10 +267,21 @@ static void __fastcall FixRanges(unsigned char* param, unsigned char* accessor) 
     }
     if (hi < APP_START) return;
 
+    // Autosave-history ring: keep the manual block below it and make sure the
+    // tile-content bound (param+0xC) reaches the ring tiles.
+    const unsigned histStart = g_ctx->autoHistStart;
+    const bool hist = g_ctx->autoRva && g_ctx->autoHistCount > 0 && histStart > APP_START;
+    if (hist && hi >= histStart) hi = histStart - 1;
+    unsigned tileBound = hi + 1;
+    if (hist) {
+        unsigned histEnd = histStart + (unsigned)g_ctx->autoHistCount;
+        if (histEnd > tileBound) tileBound = histEnd;
+    }
+
     // Our previously appended block? Extend it in place.
     for (unsigned i = 0; i < n; ++i) {
-        if (r[i].start == APP_START) {
-            *(unsigned*)(param + 0xC) = hi + 1;
+        if (r[i].start == APP_START && n >= 2) {     // n>=2: never the game's {200,203}
+            *(unsigned*)(param + 0xC) = tileBound;
             if (r[i].end != hi) {
                 r[i].end = hi;
                 *(unsigned*)(param + 0x78) = n;
@@ -205,6 +309,11 @@ static void __fastcall FixRanges(unsigned char* param, unsigned char* accessor) 
     if (!saveStyle) {
         // Ordered mode (experiment): new block first, reserved tiles last.
         if (m < 8) { tmp[m].start = APP_START; tmp[m].end = hi; tmp[m].flag = 1; ++m; }
+        if (hist && m < 8) {                         // autosave-history ring block
+            tmp[m].start = histStart;
+            tmp[m].end   = histStart + (unsigned)g_ctx->autoHistCount - 1;
+            tmp[m].flag  = 1; ++m;
+        }
         if (src170) { if (m < 8) tmp[m++] = *src170; }   // autosave, verbatim
         else { tmp[m].start = 170; tmp[m].end = 170; tmp[m].flag = 1; ++m; }
         if (src171) { if (m < 8) tmp[m++] = *src171; }   // chapter-clears, verbatim
@@ -231,7 +340,7 @@ static void __fastcall FixRanges(unsigned char* param, unsigned char* accessor) 
 
     memcpy(r, tmp, m * sizeof(Range));
     *(unsigned*)(param + 0x78) = m;
-    *(unsigned*)(param + 0xC) = hi + 1;   // tile-count bound (see note 3 above)
+    *(unsigned*)(param + 0xC) = tileBound;   // tile-count bound (see note 3 above)
 }
 
 static void patchFixedBounds();
@@ -442,7 +551,7 @@ bool installGame(const GameModule& game, GameContext& ctx) {
         }
     }
 
-    unsigned char* cave = (unsigned char*)allocNear((void*)(ctx.base + ctx.setters[0].rva), 1024);
+    unsigned char* cave = (unsigned char*)allocNear((void*)(ctx.base + ctx.setters[0].rva), 4096);
     if (!cave) { L("ABORT: could not allocate a code cave within 2GB.\n"); return false; }
     unsigned char* p = cave;
 
@@ -456,6 +565,26 @@ bool installGame(const GameModule& game, GameContext& ctx) {
                               ctx.setters[i].paramInRdx ? 1 : 0, FixRanges);
         if (!hookSite(site, SETTER_LEN, entry)) { L("ABORT: hook +0x%X failed.\n", ctx.setters[i].rva); return false; }
         L("OK: ranges hook +0x%X -> cave 0x%llx\n", ctx.setters[i].rva, (unsigned long long)(uintptr_t)entry);
+    }
+
+    // Autosave history: mirror the live autosave into a ring of extra slots.
+    // The hook replays the game's `mov edx,<slot>` and calls our helper before
+    // the write, so the live slot keeps its stock meaning ("load latest").
+    if (ctx.autoHistCount > 0 && ctx.autoRva && ctx.autoLen) {
+        unsigned char* site = (unsigned char*)(ctx.base + ctx.autoRva);
+        if (memcmp(site, ctx.autoExpect, ctx.autoLen) != 0) {
+            L("WARNING: autosave site +0x%X mismatch; autosave history disabled.\n", ctx.autoRva);
+        } else {
+            unsigned char* entry = p;
+            p = emitCallThunk(p, site, ctx.autoExpect, ctx.autoLen, 4, (void*)AutosaveHistoryTick);
+            if (hookSite(site, ctx.autoLen, entry))
+                L("OK: autosave-history hook +0x%X -> cave 0x%llx (ring %u..%u)\n",
+                  ctx.autoRva, (unsigned long long)(uintptr_t)entry,
+                  ctx.autoHistStart,
+                  ctx.autoHistStart + (unsigned)ctx.autoHistCount - 1);
+            else
+                L("ABORT: autosave-history hook +0x%X failed.\n", ctx.autoRva);
+        }
     }
 
     if (backing) {
