@@ -224,10 +224,13 @@ static void AutosaveHistoryTick(void) {
 
 // Called from the setter caves with the dialog param block (arg2 = accessor).
 // Rebuilt layouts:
-//   load-style: [manual <170] [{200..hi}] [{170,170}] [{171,174}] [{175,199} filler]
-//               rendered via the container's ordered-mode flag (+0xDE0=1),
-//               so the autosave/backups sit at the BOTTOM of the menu.
-//   save-style: [manual <170] [{200..hi}]  with 170-199 left UNCOVERED.
+//   load-style: [manual <170] [{200..headEnd}] [{histEnd+1..hi}] [{ring}]
+//               [{170,170}] [{171,179}] [{180,199} filler], ordered-mode flag=1
+//               so the autosave/backup tiles sit at the BOTTOM of the menu.
+//   save-style: [manual <170] [{200..headEnd}] [{histEnd+1..hi}] with the ring
+//               and 170-199 left UNCOVERED.
+// headEnd is raised past 300 (split around the ring) once the backing redirect
+// has lifted the ceiling, so MaxSlots>300 actually adds slots.
 // Constraints driving this layout (2026-08 game update):
 //  1. The sequential tile renderer locks tile position == slot_number; gaps
 //     are only allowed where nothing should ever render or be selectable.
@@ -267,52 +270,52 @@ static void __fastcall FixRanges(unsigned char* param, unsigned char* accessor) 
     }
     if (hi < APP_START) return;
 
-    // Autosave-history ring: keep the manual block below it and make sure the
-    // tile-content bound (param+0xC) reaches the ring tiles.
-    const unsigned histStart = g_ctx->autoHistStart;
-    const bool hist = g_ctx->autoRva && g_ctx->autoHistCount > 0 && histStart > APP_START;
-    if (hist && hi >= histStart) hi = histStart - 1;
-    unsigned tileBound = hi + 1;
-    if (hist) {
-        unsigned histEnd = histStart + (unsigned)g_ctx->autoHistCount;
-        if (histEnd > tileBound) tileBound = histEnd;
+    // Recognise our own rebuilt list: it is the only normal dialog whose ranges
+    // reach APP_START (n>=2 so the game's single-range {200,203} system list is
+    // not mistaken for ours). Ours is regenerated from scratch every call, which
+    // is also what lets a later call pick up a raised ceiling once the >300
+    // backing redirect has kicked in (setters run before the icon pass).
+    bool ours = false;
+    for (unsigned i = 0; i < n; ++i)
+        if (r[i].start >= APP_START) { ours = (n >= 2); break; }
+
+    if (!ours) {
+        // Reserved system dialog ({180,199}) or unknown high-slot list: untouched.
+        for (unsigned i = 0; i < n; ++i)
+            if (r[i].end >= 180) return;
     }
 
-    // Our previously appended block? Extend it in place.
-    for (unsigned i = 0; i < n; ++i) {
-        if (r[i].start == APP_START && n >= 2) {     // n>=2: never the game's {200,203}
-            *(unsigned*)(param + 0xC) = tileBound;
-            if (r[i].end != hi) {
-                r[i].end = hi;
-                *(unsigned*)(param + 0x78) = n;
-                L("FixRanges: extended new block to %u\n", hi);
-            }
-            return;
-        }
-    }
-    // Reserved system dialog ({180,199}) or unknown high-slot list: untouched.
-    // (Our own lists never reach here - the extend-loop above returns first.)
-    for (unsigned i = 0; i < n; ++i)
-        if (r[i].end >= 180) return;
+    // Autosave-history ring sits at the top of the stock 300 window. When the
+    // backing redirect raises the ceiling above it, the manual/new block is
+    // split around the ring so slots beyond 300 stay usable.
+    const unsigned histStart = g_ctx->autoHistStart;
+    const bool hist = g_ctx->autoRva && g_ctx->autoHistCount > 0 && histStart > APP_START;
+    const unsigned histEnd = hist ? histStart + (unsigned)g_ctx->autoHistCount - 1 : 0;
+    const bool split = hist && hi >= histStart;
+    const unsigned headEnd = split ? histStart - 1 : hi;
 
     const Range* src170 = nullptr;
     const Range* src171 = nullptr;
     bool saveStyle = true;                         // no reserved entries?
+    Range manual[8]; unsigned nm = 0;
     for (unsigned i = 0; i < n; ++i) {
+        if (r[i].start >= APP_START) continue;     // ours: drop, regenerate below
         if      (r[i].start == 170) { src170 = &r[i]; saveStyle = false; }
         else if (r[i].start == 171) { src171 = &r[i]; saveStyle = false; }
+        else if (r[i].start <  170) { if (nm < 8) manual[nm++] = r[i]; }
     }
 
     Range tmp[8]; unsigned m = 0;
-    for (unsigned i = 0; i < n && m < 8; ++i)      // manual slots, stock order
-        if (r[i].start < 170) tmp[m++] = r[i];
+    for (unsigned i = 0; i < nm && m < 8; ++i)     // stock manual lead (e.g. {0,159})
+        tmp[m++] = manual[i];
+    if (m < 8) { tmp[m].start = APP_START; tmp[m].end = headEnd; tmp[m].flag = 1; ++m; }
+    if (split && hi > histEnd && m < 8) {          // manual tail above the ring
+        tmp[m].start = histEnd + 1; tmp[m].end = hi; tmp[m].flag = 1; ++m;
+    }
     if (!saveStyle) {
-        // Ordered mode (experiment): new block first, reserved tiles last.
-        if (m < 8) { tmp[m].start = APP_START; tmp[m].end = hi; tmp[m].flag = 1; ++m; }
-        if (hist && m < 8) {                         // autosave-history ring block
-            tmp[m].start = histStart;
-            tmp[m].end   = histStart + (unsigned)g_ctx->autoHistCount - 1;
-            tmp[m].flag  = 1; ++m;
+        // Ordered load menu: ring next, then the reserved tiles verbatim.
+        if (hist && m < 8) {                       // autosave-history ring block
+            tmp[m].start = histStart; tmp[m].end = histEnd; tmp[m].flag = 1; ++m;
         }
         if (src170) { if (m < 8) tmp[m++] = *src170; }   // autosave, verbatim
         else { tmp[m].start = 170; tmp[m].end = 170; tmp[m].flag = 1; ++m; }
@@ -327,20 +330,23 @@ static void __fastcall FixRanges(unsigned char* param, unsigned char* accessor) 
         if (g_ctx->offTileContainer >= 0 && accessor)
             *(unsigned*)(accessor + (unsigned)g_ctx->offTileContainer + 0xDE0) = 1;
     } else {
-        // saveStyle: leave 170-199 UNCOVERED. The tile renderer is range-
-        // independent (it walks positions and tree-lookups each slot), but
-        // the enumerator/confirm/enable passes all test ranges - an
-        // uncovered slot is never enumerated, never selectable, never
-        // savable. That hides the autosave and backups from the save menu
-        // exactly like stock did.
-        if (m < 8) { tmp[m].start = APP_START; tmp[m].end = hi; tmp[m].flag = 1; ++m; }
+        // saveStyle: the ring and 170-199 stay uncovered. The enumerator/
+        // confirm/enable passes all test ranges, so an uncovered slot is never
+        // enumerated, selectable or savable - exactly like stock.
         if (g_ctx->offTileContainer >= 0 && accessor)
             *(unsigned*)(accessor + (unsigned)g_ctx->offTileContainer + 0xDE0) = 0;
     }
 
+    unsigned tileBound = hi + 1;
+    if (hist && histEnd + 1 > tileBound) tileBound = histEnd + 1;
+
     memcpy(r, tmp, m * sizeof(Range));
     *(unsigned*)(param + 0x78) = m;
     *(unsigned*)(param + 0xC) = tileBound;   // tile-count bound (see note 3 above)
+    L("FixRanges: hi=%u head=%u split=%d tileBound=%u style=%s ours=%d n=%u\n",
+      hi, headEnd, split ? 1 : 0, tileBound, saveStyle ? "save" : "load", ours ? 1 : 0, m);
+    for (unsigned i = 0; i < m; ++i)
+        L("  range[%u] = {%u,%u,f%u}\n", i, tmp[i].start, tmp[i].end, tmp[i].flag);
 }
 
 static void patchFixedBounds();

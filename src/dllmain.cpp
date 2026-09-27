@@ -98,7 +98,8 @@ static DWORD WINAPI init(LPVOID param) {
       autoSlots > 0 ? ctx.autoHistStart + (unsigned)autoSlots - 1 : 0);
 
     installGame(*game, ctx);
-    coreCloseLog();
+    // The log is deliberately kept open: FixRanges/FixBacking/AutosaveHistoryTick
+    // run long after init and their diagnostics are the point of the file.
     return 0;
 }
 
