@@ -17,7 +17,7 @@ load:
 | Game | Host exe | Stock slots |
 |---|---|---|
 | Trails in the Sky 1st Chapter | `sora_1st.exe` | 175 |
-| Trails in the Sky 2nd Chapter (demo) | `sora_2nd.exe` | 170 |
+| Trails in the Sky 2nd Chapter | `sora_2nd.exe` | 170 |
 
 No game files are modified; the patch is applied to the running process and
 disappears when the game closes.
@@ -79,6 +79,8 @@ the backing-redirect site (ctor tail vs icon-pass entry via `.pdata`).
 ```ini
 [SoraSaveSlots]
 MaxSlots=999
+AutosaveSlots=10
+DynamicWindow=1
 ```
 
 New slots run from 200 to `MaxSlots-1`. Values above **999** are clamped
@@ -89,6 +91,28 @@ New slots run from 200 to `MaxSlots-1`. Values above **999** are clamped
   are applied too. This is the riskier half: it redirects a structure the
   game normally owns. It degrades safely (to 300) if any patch site doesn't
   match.
+- **`AutosaveSlots`** (2nd Chapter only) — size of the rolling autosave
+  history, see below. `0` disables it.
+- **`DynamicWindow`** — shrink the menu to *(last save on disk + 50)* tiles
+  instead of always showing `MaxSlots`.
+
+At 999 expect slower menu opening: the game reads the per-slot detail for every
+listed slot on each dialog refresh, loads up to 999 icons at startup, and builds
+1000 slot tiles.
+
+---
+
+## Autosave history (2nd Chapter)
+
+The game keeps **one** live autosave slot (`save170`). With `AutosaveSlots=N`
+the plugin mirrors every autosave into a ring of `N` extra slots (default
+`290–299`) just *before* the live slot is overwritten, and shows the ring as its
+own block in the load menu, directly above the autosave / chapter-clear tiles.
+
+The live slot, the game's writer and the "load latest"/Continue paths are left
+completely untouched — the ring only keeps copies. It fills oldest-first, so you
+keep a rolling history of the last `N` autosaves. Slots above 300 are still
+usable: the manual block is split around the ring (`200–289` + `300–…`).
 
 At 999 expect slower menu opening: the game reads `detail.json` for every
 listed slot on each dialog refresh, loads up to 999 `icon0.png`s at startup,

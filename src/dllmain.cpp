@@ -44,7 +44,7 @@ static DWORD WINAPI init(LPVOID param) {
     siblingPath(inip, MAX_PATH, self, L".ini");
     coreOpenLog(logp);
 
-    L("SoraSaveSlots v5.2\n");
+    L("SoraSaveSlots v6.0.0\n");
 
     // ---- detect host exe --------------------------------------------------
     wchar_t exeName[MAX_PATH];

@@ -1,7 +1,8 @@
 # Trails in the Sky 2nd Chapter — multi-slot autosave: investigation + plan
 
-Status: **feasible, not implemented.** All facts below are from static analysis of the
-shipping build; no game file was modified, nothing was injected (the game was running).
+Status: **implemented** (branch `feat/sky2-autosave-history`, shipped in v6.0.0). All facts
+below are from static analysis of the shipping build; the investigation itself did not
+modify any game file.
 
 Target binary: `Z:\SteamLibrary\steamapps\common\Trails in the Sky 2nd Chapter\sora_2nd.exe`
 - file version `1.3.2.0`, size 13,464,576, SHA256 `D8B2911D…F8AAF`
